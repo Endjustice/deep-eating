@@ -2,7 +2,7 @@
 
 # =============================================
 # SUDO FOR TERMUX - ENHANCED VERSION
-# Version: 2.1
+# Version: 2.2
 # Author: Endjustice
 # Repository: https://github.com/Endjustice/deep-eating
 # =============================================
@@ -12,9 +12,8 @@ colored=true
 red=1 green=2 yellow=3 blue=4 magenta=5 cyan=6
 
 # Logging configuration
-LOG_ENABLED=false  # Disable logging by default to avoid permission issues
+LOG_ENABLED=false
 LOG_FILE="/data/data/com.termux/files/usr/tmp/sudo.log"
-MAX_LOG_SIZE=1048576 # 1MB
 
 # Security configuration
 TIMEOUT_DURATION=30
@@ -70,19 +69,6 @@ check_termux_environment() {
     fi
 }
 
-# Validate input arguments
-validate_arguments() {
-    if [ $# -gt 0 ]; then
-        local total_length=0
-        for arg in "$@"; do
-            total_length=$((total_length + ${#arg}))
-            if [ $total_length -gt $MAX_ARGS_LENGTH ]; then
-                error_exit "Arguments too long. Maximum allowed: $MAX_ARGS_LENGTH characters"
-            fi
-        done
-    fi
-}
-
 show_usage() {
     echo -e "\n$(color $cyan "╔══════════════════════════════════╗")"
     echo -e "$(color $cyan "║           SUDO FOR TERMUX         ║")"
@@ -92,10 +78,6 @@ show_usage() {
     echo -e "    Drop to root shell\n"
     echo -e "  $(color $green "sudo <command> [<args>]")"
     echo -e "    Run command as root with optional arguments\n"
-    echo -e "  $(color $green "sudo -v")"
-    echo -e "    Validate root access\n"
-    echo -e "  $(color $green "sudo -l")"
-    echo -e "    Show sudo configuration\n"
     echo -e "$(color $magenta "Examples:")"
     echo -e "  sudo apt update"
     echo -e "  sudo su"
@@ -104,40 +86,19 @@ show_usage() {
     exit 0
 }
 
-show_version() {
-    echo -e "$(color $cyan "sudo for Termux v2.1")"
-    echo -e "Fixed SU binary detection"
-    exit 0
-}
-
-show_config() {
-    echo -e "\n$(color $yellow "Current Configuration:")"
-    echo -e "  Colored output: $colored"
-    echo -e "  Logging: $LOG_ENABLED"
-    echo -e "  Timeout: ${TIMEOUT_DURATION}s"
-    echo -e "  Root HOME: $ROOT_HOME"
-    echo -e "  Found SU: $SU"
-    
-    if [ -x "$SU" ]; then
-        local su_version=$($SU -v 2>/dev/null || echo "Unknown")
-        echo -e "  SU version: $su_version"
-    fi
-    exit 0
-}
-
 # Path configurations
 SYSBIN=/system/bin
 SYSXBIN=/system/xbin
-BB=$SYSXBIN/busybox
 PRE=/data/data/com.termux/files
 ROOT_HOME=$PRE/home/.suroot
 BINPRE=$PRE/usr/bin
 LDLP="export LD_LIBRARY_PATH=$PRE/usr/lib"
 CMDLINE="PATH=$PATH:$SYSXBIN:$SYSBIN;$LDLP;HOME=$ROOT_HOME;cd $PWD"
 
-# Enhanced SU binary finder with better detection
+# Enhanced SU binary finder - ONLY system paths
 find_su() {
-    local su_paths=(
+    # System SU paths - ignore Termux paths
+    local system_su_paths=(
         "/sbin/su"
         "/system/bin/su"
         "/system/xbin/su"
@@ -149,11 +110,11 @@ find_su() {
         "/data/adb/ksu/bin/su"
     )
     
-    info "Searching for SU binary..."
+    info "Searching for system SU binary..."
     
-    for path in "${su_paths[@]}"; do
+    for path in "${system_su_paths[@]}"; do
         if [ -x "$path" ]; then
-            info "Found SU at: $path"
+            info "Found system SU at: $path"
             # Test if SU actually works
             if $path -c "id" 2>/dev/null | grep -q "uid=0"; then
                 info "SU binary is functional: $path"
@@ -165,16 +126,30 @@ find_su() {
         fi
     done
     
-    # Additional check using which and command
-    local which_su=$(command -v su 2>/dev/null)
-    if [ -n "$which_su" ] && [ -x "$which_su" ]; then
-        info "Found SU via command -v: $which_su"
-        if $which_su -c "id" 2>/dev/null | grep -q "uid=0"; then
-            echo "$which_su"
-            return 0
-        fi
-    fi
+    return 1
+}
+
+# Manual SU test function
+manual_su_test() {
+    echo -e "$(color $yellow "Testing root access manually...")"
     
+    # Test various SU commands
+    local test_paths=("/sbin/su" "/system/bin/su" "/system/xbin/su" "/su/bin/su")
+    
+    for path in "${test_paths[@]}"; do
+        if [ -x "$path" ]; then
+            echo -e "$(color $blue "Trying: $path")"
+            if $path -c "id" 2>/dev/null; then
+                echo -e "$(color $green "SUCCESS with: $path")"
+                return 0
+            fi
+        fi
+    done
+    
+    echo -e "$(color $red "Manual test failed. Please check:")"
+    echo -e "  1. Run 'su' manually in Termux"
+    echo -e "  2. Grant root permission to Termux"
+    echo -e "  3. Check if your device is properly rooted"
     return 1
 }
 
@@ -186,187 +161,57 @@ validate_su() {
     
     # Test SU functionality with simple command
     if ! $SU -c "id" 2>/dev/null | grep -q "uid=0"; then
-        error_exit "SU binary is not functional: $SU - Make sure your device is properly rooted and SU works manually first"
+        echo -e "$(color $red "SU binary found but not functional: $SU")"
+        manual_su_test
+        error_exit "Cannot get root access. Please fix root permissions first."
     fi
     
     info "SU binary validated successfully: $SU"
 }
 
-# Find mount executable
-find_mount() {
-    local mount_paths=(
-        "$SYSBIN/mount"
-        "$SYSXBIN/mount"
-        "/sbin/mount"
-        "/system/bin/mount"
-        "/vendor/bin/mount"
-    )
-    
-    for path in "${mount_paths[@]}"; do
-        if [ -x "$path" ]; then
-            echo "$path"
-            return 0
-        fi
-    done
-    
-    # Check busybox for mount
-    if [ -x "$BB" ] && $BB --list 2>/dev/null | grep -q -w mount; then
-        echo "$BB mount"
-        return 0
-    fi
-    
-    return 1
-}
-
-# Setup root environment
+# Setup root environment (simplified)
 setup_root_env() {
     if [ ! -d "$ROOT_HOME" ]; then
         info "Setting up root environment..."
         
-        MOUNTEX=$(find_mount)
-        if [ -z "$MOUNTEX" ]; then
-            warning "Cannot find mount executable, trying without remount..."
-            # Try to create directory without remount
-            if [ -x "/sbin/magisk" ]; then
-                unset LD_LIBRARY_PATH
-                if ! $SU -c "$CMDLINE;mkdir -p $ROOT_HOME 2>/dev/null"; then
-                    error_exit "Failed to create root home directory"
-                fi
-            else
-                if ! $SU -c "mkdir -p $ROOT_HOME 2>/dev/null"; then
-                    error_exit "Failed to create root home directory"
-                fi
-            fi
+        # Try to create directory without remount first
+        if ! $SU -c "mkdir -p $ROOT_HOME 2>/dev/null" || \
+           ! $SU -c "chmod 700 $ROOT_HOME 2>/dev/null"; then
+            warning "Failed to setup root home, continuing anyway..."
         else
-            MOUNT_RW="$MOUNTEX -o rw,remount,rw /system 2>/dev/null"
-            MOUNT_RO="$MOUNTEX -o ro,remount,ro /system 2>/dev/null"
-            
-            log "Using mount executable: $MOUNTEX"
-            
-            # Create root home directory
-            if [ -x "/sbin/magisk" ]; then
-                unset LD_LIBRARY_PATH
-                if ! $SU -c "$CMDLINE;$MOUNT_RW" || \
-                   ! $SU -c "$CMDLINE;mkdir -p $ROOT_HOME" || \
-                   ! $SU -c "$CMDLINE;chmod 700 $ROOT_HOME"; then
-                    error_exit "Failed to setup root environment with Magisk"
-                fi
-            else
-                if ! $SU -c "$MOUNT_RW" || \
-                   ! $SU -c "mkdir -p $ROOT_HOME" || \
-                   ! $SU -c "chmod 700 $ROOT_HOME"; then
-                    error_exit "Failed to setup root environment"
-                fi
-            fi
-        fi
-
-        # Create .bashrc for root
-        local bashrc_content="PS1=\"# \"\nexport TERM=$TERM\n$LDLP\nexport PATH=$PATH:$SYSXBIN:$SYSBIN\nalias ls='ls --color=auto'\nalias ll='ls -la'\nalias la='ls -A'"
-        
-        if [ -x "/sbin/magisk" ]; then
-            $SU -c "$CMDLINE;echo -e '$bashrc_content' > $ROOT_HOME/.bashrc 2>/dev/null" && \
-            $SU -c "$CMDLINE;chmod 700 $ROOT_HOME/.bashrc 2>/dev/null"
-            [ -n "$MOUNTEX" ] && $SU -c "$CMDLINE;$MOUNT_RO 2>/dev/null"
-        else
+            # Create basic .bashrc for root
+            local bashrc_content="PS1=\"# \"\nexport TERM=$TERM\n$LDLP\nexport PATH=$PATH:$SYSXBIN:$SYSBIN"
             $SU -c "echo -e '$bashrc_content' > $ROOT_HOME/.bashrc 2>/dev/null" && \
-            $SU -c "chmod 700 $ROOT_HOME/.bashrc 2>/dev/null"
-            [ -n "$MOUNTEX" ] && $SU -c "$MOUNT_RO 2>/dev/null"
-        fi
-        
-        info "Root environment setup completed"
-    else
-        log "Root environment already exists: $ROOT_HOME"
-    fi
-}
-
-# Validate root access
-validate_root_access() {
-    if ! $SU -c "id" 2>/dev/null | grep -q "uid=0"; then
-        error_exit "Root access validation failed"
-    fi
-    info "Root access validated successfully"
-}
-
-# Enhanced command execution with timeout
-execute_command() {
-    local cmd="$1"
-    local args="${*:2}"
-    
-    local full_cmd
-    if [ -x "$BINPRE/$cmd" ]; then
-        full_cmd="$BINPRE/$cmd $args"
-    elif command -v "$cmd" >/dev/null 2>&1; then
-        full_cmd="$cmd $args"
-    else
-        error_exit "Command not found: $cmd"
-    fi
-    
-    CMDLINE="$CMDLINE;$full_cmd"
-    log "Executing command: $full_cmd"
-    
-    # Check for preserve-environment support
-    local pre_env_chk=$($SU --help 2>/dev/null | grep -e --preserve-environment)
-    
-    if [ -x "/sbin/magisk" ]; then
-        unset LD_LIBRARY_PATH
-    fi
-
-    # Execute with timeout
-    if command -v timeout >/dev/null 2>&1; then
-        if [ -n "$pre_env_chk" ]; then
-            timeout $TIMEOUT_DURATION $SU --preserve-environment -c "$CMDLINE"
-        else
-            timeout $TIMEOUT_DURATION $SU -c "$CMDLINE"
-        fi
-    else
-        if [ -n "$pre_env_chk" ]; then
-            $SU --preserve-environment -c "$CMDLINE"
-        else
-            $SU -c "$CMDLINE"
+            $SU -c "chmod 700 $ROOT_HOME/.bashrc 2>/dev/null" && \
+            info "Root environment setup completed"
         fi
     fi
-    
-    local exit_code=$?
-    log "Command exited with code: $exit_code"
-    return $exit_code
 }
 
 # Main function
 main() {
     init_log
     check_termux_environment
-    validate_arguments "$@"
     
-    log "sudo invoked with arguments: $*"
-    
-    # Handle special options
-    case "$1" in
-        "-h"|"--help")
-            show_usage
-            ;;
-        "-v"|"--version")
-            show_version
-            ;;
-        "-l"|"--list")
-            show_config
-            ;;
-        "--validate")
-            validate_root_access
-            exit 0
-            ;;
-    esac
+    # Handle help
+    if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+        show_usage
+    fi
     
     # Find and validate SU
     SU=$(find_su)
     if [ -z "$SU" ]; then
-        echo -e "\n$(color $red "SU binary not found!")"
-        echo -e "$(color $yellow "Make sure:")"
-        echo -e "  1. Your device is properly rooted"
-        echo -e "  2. SU binary is installed (Magisk, SuperSU, etc.)"
-        echo -e "  3. Try running 'su' manually first"
-        echo -e "  4. Check if Termux has root permission\n"
+        echo -e "\n$(color $red "No functional SU binary found!")"
+        echo -e "$(color $yellow "Troubleshooting steps:")"
+        echo -e "  1. Run 'su' manually in Termux"
+        echo -e "  2. Make sure Termux has root permission"
+        echo -e "  3. Check if your device is properly rooted"
+        echo -e "  4. Try installing Magisk or SuperSU"
+        echo -e ""
+        manual_su_test
         exit 1
     fi
+    
     validate_su
     
     # Setup environment if needed
@@ -384,31 +229,24 @@ main() {
             else
                 CMDLINE="$CMDLINE;$BINPRE/bash"
             fi
-            log "Starting root shell"
+            info "Starting root shell"
             ;;
         *)
-            execute_command "$@"
-            exit $?
+            # Build command line for execution
+            local args=$(printf '%q ' "$@")
+            if [ -x "$BINPRE/$1" ]; then
+                CMDLINE="$CMDLINE;$BINPRE/$args"
+            elif command -v "$1" >/dev/null 2>&1; then
+                CMDLINE="$CMDLINE;$args"
+            else
+                error_exit "Command not found: $1"
+            fi
             ;;
     esac
     
-    # Execute the final command
-    local pre_env_chk=$($SU --help 2>/dev/null | grep -e --preserve-environment)
-    
-    if [ -x "/sbin/magisk" ]; then
-        unset LD_LIBRARY_PATH
-    fi
-
-    if [ -n "$pre_env_chk" ]; then
-        $SU --preserve-environment -c "$CMDLINE"
-    else
-        $SU -c "$CMDLINE"
-    fi
+    # Execute the command
+    $SU -c "$CMDLINE"
 }
-
-# Signal handlers
-trap 'error_exit "Script interrupted by user"' INT TERM
-trap 'log "Script execution completed"' EXIT
 
 # Run main function
 main "$@"
