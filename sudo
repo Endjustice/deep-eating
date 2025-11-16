@@ -2,7 +2,7 @@
 
 # =============================================
 # SUDO FOR TERMUX - ENHANCED VERSION
-# Version: 2.0
+# Version: 2.1
 # Author: Endjustice
 # Repository: https://github.com/Endjustice/deep-eating
 # =============================================
@@ -12,8 +12,8 @@ colored=true
 red=1 green=2 yellow=3 blue=4 magenta=5 cyan=6
 
 # Logging configuration
-LOG_ENABLED=true
-LOG_FILE="/data/data/com.termux/files/usr/var/log/sudo.log"
+LOG_ENABLED=false  # Disable logging by default to avoid permission issues
+LOG_FILE="/data/data/com.termux/files/usr/tmp/sudo.log"
 MAX_LOG_SIZE=1048576 # 1MB
 
 # Security configuration
@@ -31,12 +31,7 @@ init_log() {
 log() {
     if [ "$LOG_ENABLED" = "true" ]; then
         local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-        echo "[$timestamp] $1" >> "$LOG_FILE"
-        
-        # Rotate log if too large
-        if [ -f "$LOG_FILE" ] && [ $(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0) -gt $MAX_LOG_SIZE ]; then
-            mv "$LOG_FILE" "${LOG_FILE}.old" 2>/dev/null
-        fi
+        echo "[$timestamp] $1" >> "$LOG_FILE" 2>/dev/null || true
     fi
 }
 
@@ -110,8 +105,8 @@ show_usage() {
 }
 
 show_version() {
-    echo -e "$(color $cyan "sudo for Termux v2.0")"
-    echo -e "Enhanced version with better error handling and logging"
+    echo -e "$(color $cyan "sudo for Termux v2.1")"
+    echo -e "Fixed SU binary detection"
     exit 0
 }
 
@@ -140,32 +135,44 @@ BINPRE=$PRE/usr/bin
 LDLP="export LD_LIBRARY_PATH=$PRE/usr/lib"
 CMDLINE="PATH=$PATH:$SYSXBIN:$SYSBIN;$LDLP;HOME=$ROOT_HOME;cd $PWD"
 
-# Enhanced SU binary finder
+# Enhanced SU binary finder with better detection
 find_su() {
     local su_paths=(
-        "/magisk/.core/bin/su"
-        "/sbin/su" 
-        "/system/xbin/su"
-        "/su/bin/su"
+        "/sbin/su"
         "/system/bin/su"
+        "/system/xbin/su"
         "/vendor/bin/su"
         "/product/bin/su"
+        "/su/bin/su"
+        "/magisk/.core/bin/su"
+        "/data/adb/magisk/su"
+        "/data/adb/ksu/bin/su"
     )
+    
+    info "Searching for SU binary..."
     
     for path in "${su_paths[@]}"; do
         if [ -x "$path" ]; then
-            log "Found SU at: $path"
-            echo "$path"
-            return 0
+            info "Found SU at: $path"
+            # Test if SU actually works
+            if $path -c "id" 2>/dev/null | grep -q "uid=0"; then
+                info "SU binary is functional: $path"
+                echo "$path"
+                return 0
+            else
+                warning "SU binary found but not functional: $path"
+            fi
         fi
     done
     
-    # Additional check using which command
+    # Additional check using which and command
     local which_su=$(command -v su 2>/dev/null)
     if [ -n "$which_su" ] && [ -x "$which_su" ]; then
-        log "Found SU via which: $which_su"
-        echo "$which_su"
-        return 0
+        info "Found SU via command -v: $which_su"
+        if $which_su -c "id" 2>/dev/null | grep -q "uid=0"; then
+            echo "$which_su"
+            return 0
+        fi
     fi
     
     return 1
@@ -177,10 +184,12 @@ validate_su() {
         error_exit "SU binary not executable: $SU"
     fi
     
-    # Test SU functionality
-    if ! $SU -c "exit 0" >/dev/null 2>&1; then
-        error_exit "SU binary is not functional: $SU"
+    # Test SU functionality with simple command
+    if ! $SU -c "id" 2>/dev/null | grep -q "uid=0"; then
+        error_exit "SU binary is not functional: $SU - Make sure your device is properly rooted and SU works manually first"
     fi
+    
+    info "SU binary validated successfully: $SU"
 }
 
 # Find mount executable
@@ -201,7 +210,7 @@ find_mount() {
     done
     
     # Check busybox for mount
-    if [ -x "$BB" ] && $BB --list | grep -q -w mount; then
+    if [ -x "$BB" ] && $BB --list 2>/dev/null | grep -q -w mount; then
         echo "$BB mount"
         return 0
     fi
@@ -216,27 +225,38 @@ setup_root_env() {
         
         MOUNTEX=$(find_mount)
         if [ -z "$MOUNTEX" ]; then
-            error_exit "Cannot find mount executable"
-        fi
-
-        MOUNT_RW="$MOUNTEX -o rw,remount,rw /system 2>/dev/null"
-        MOUNT_RO="$MOUNTEX -o ro,remount,ro /system 2>/dev/null"
-        
-        log "Using mount executable: $MOUNTEX"
-        
-        # Create root home directory
-        if [ -x "/sbin/magisk" ]; then
-            unset LD_LIBRARY_PATH
-            if ! $SU -c "$CMDLINE;$MOUNT_RW" || \
-               ! $SU -c "$CMDLINE;mkdir -p $ROOT_HOME" || \
-               ! $SU -c "$CMDLINE;chmod 700 $ROOT_HOME"; then
-                error_exit "Failed to setup root environment with Magisk"
+            warning "Cannot find mount executable, trying without remount..."
+            # Try to create directory without remount
+            if [ -x "/sbin/magisk" ]; then
+                unset LD_LIBRARY_PATH
+                if ! $SU -c "$CMDLINE;mkdir -p $ROOT_HOME 2>/dev/null"; then
+                    error_exit "Failed to create root home directory"
+                fi
+            else
+                if ! $SU -c "mkdir -p $ROOT_HOME 2>/dev/null"; then
+                    error_exit "Failed to create root home directory"
+                fi
             fi
         else
-            if ! $SU -c "$MOUNT_RW" || \
-               ! $SU -c "mkdir -p $ROOT_HOME" || \
-               ! $SU -c "chmod 700 $ROOT_HOME"; then
-                error_exit "Failed to setup root environment"
+            MOUNT_RW="$MOUNTEX -o rw,remount,rw /system 2>/dev/null"
+            MOUNT_RO="$MOUNTEX -o ro,remount,ro /system 2>/dev/null"
+            
+            log "Using mount executable: $MOUNTEX"
+            
+            # Create root home directory
+            if [ -x "/sbin/magisk" ]; then
+                unset LD_LIBRARY_PATH
+                if ! $SU -c "$CMDLINE;$MOUNT_RW" || \
+                   ! $SU -c "$CMDLINE;mkdir -p $ROOT_HOME" || \
+                   ! $SU -c "$CMDLINE;chmod 700 $ROOT_HOME"; then
+                    error_exit "Failed to setup root environment with Magisk"
+                fi
+            else
+                if ! $SU -c "$MOUNT_RW" || \
+                   ! $SU -c "mkdir -p $ROOT_HOME" || \
+                   ! $SU -c "chmod 700 $ROOT_HOME"; then
+                    error_exit "Failed to setup root environment"
+                fi
             fi
         fi
 
@@ -244,13 +264,13 @@ setup_root_env() {
         local bashrc_content="PS1=\"# \"\nexport TERM=$TERM\n$LDLP\nexport PATH=$PATH:$SYSXBIN:$SYSBIN\nalias ls='ls --color=auto'\nalias ll='ls -la'\nalias la='ls -A'"
         
         if [ -x "/sbin/magisk" ]; then
-            $SU -c "$CMDLINE;echo -e '$bashrc_content' > $ROOT_HOME/.bashrc" && \
-            $SU -c "$CMDLINE;chmod 700 $ROOT_HOME/.bashrc" && \
-            $SU -c "$CMDLINE;$MOUNT_RO"
+            $SU -c "$CMDLINE;echo -e '$bashrc_content' > $ROOT_HOME/.bashrc 2>/dev/null" && \
+            $SU -c "$CMDLINE;chmod 700 $ROOT_HOME/.bashrc 2>/dev/null"
+            [ -n "$MOUNTEX" ] && $SU -c "$CMDLINE;$MOUNT_RO 2>/dev/null"
         else
-            $SU -c "echo -e '$bashrc_content' > $ROOT_HOME/.bashrc" && \
-            $SU -c "chmod 700 $ROOT_HOME/.bashrc" && \
-            $SU -c "$MOUNT_RO"
+            $SU -c "echo -e '$bashrc_content' > $ROOT_HOME/.bashrc 2>/dev/null" && \
+            $SU -c "chmod 700 $ROOT_HOME/.bashrc 2>/dev/null"
+            [ -n "$MOUNTEX" ] && $SU -c "$MOUNT_RO 2>/dev/null"
         fi
         
         info "Root environment setup completed"
@@ -330,7 +350,7 @@ main() {
         "-l"|"--list")
             show_config
             ;;
-        "-v"|"--validate")
+        "--validate")
             validate_root_access
             exit 0
             ;;
@@ -339,7 +359,13 @@ main() {
     # Find and validate SU
     SU=$(find_su)
     if [ -z "$SU" ]; then
-        error_exit "su executable not found. sudo requires root access."
+        echo -e "\n$(color $red "SU binary not found!")"
+        echo -e "$(color $yellow "Make sure:")"
+        echo -e "  1. Your device is properly rooted"
+        echo -e "  2. SU binary is installed (Magisk, SuperSU, etc.)"
+        echo -e "  3. Try running 'su' manually first"
+        echo -e "  4. Check if Termux has root permission\n"
+        exit 1
     fi
     validate_su
     
